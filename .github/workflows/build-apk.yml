@@ -105,6 +105,44 @@ jobs:
           grep -q 'VideoPlaybackService' "$src/VideoPlayerActivity.java"
           grep -q 'ExternalVideoIntent.uriFrom' "$src/VideoPlayerActivity.java"
           grep -q 'media3-exoplayer-rtsp' app/build.gradle
+          # Open folders directly instead of the legacy branding landing page.
+          python3 - <<'PYTEST'
+          import pathlib, xml.etree.ElementTree as ET
+          manifest=ET.parse('app/src/main/AndroidManifest.xml').getroot()
+          ns='{http://schemas.android.com/apk/res/android}'
+          launch=[]
+          for activity in manifest.find('application').findall('activity'):
+              for group in activity.findall('intent-filter'):
+                  actions=[a.get(ns+'name') for a in group.findall('action')]
+                  cats=[c.get(ns+'name') for c in group.findall('category')]
+                  if 'android.intent.action.MAIN' in actions and 'android.intent.category.LAUNCHER' in cats:
+                      launch.append(activity.get(ns+'name'))
+          assert launch==['.VideoLibraryActivity'],f'Wrong launcher: {launch}'
+          lib=pathlib.Path('app/src/main/java/com/srcreationfarm/videoplayer/VideoLibraryActivity.java').read_text()
+          for marker in ['showThreeDotMenu', 'showSettingsMenu', 'showHoldSpeedDialog',
+                  'showSortDialog', 'continueLastVideo', 'showSavedVideos',
+                  'showNetworkUrlDialog', 'VideoHomeControlsLogic.resumeLabel',
+                  'switchMode(MODE_FOLDERS)', 'VideoFreshnessStore', 'VideoResumeStore']:
+              assert marker in lib,marker
+          assert 'shortcutScroll.addView' not in lib,'Old large home shortcuts remain'
+          assert 'root.addView(bottomBar' not in lib,'Old bottom shortcut bar remains'
+          print('PASS: direct folders launcher, 3-dot menus, visible saved-position Resume')
+          PYTEST
+
+      - name: Verify folder Previous and Next player integration
+        working-directory: ${{ steps.source.outputs.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          src=app/src/main/java/com/srcreationfarm/videoplayer
+          test -f "$src/VideoFolderQueueLogic.java"
+          test -f "$src/VideoFolderPlaylistLoader.java"
+          test -f tests/com/srcreationfarm/videoplayer/VideoFolderQueueLogicTest.java
+          grep -q 'EXTRA_FOLDER_PATH' "$src/VideoLibraryActivity.java"
+          grep -q 'setMediaItems(items, index, start)' "$src/VideoPlayerActivity.java"
+          grep -q 'seekToPreviousMediaItem' "$src/VideoPlayerActivity.java"
+          grep -q 'seekToNextMediaItem' "$src/VideoPlayerActivity.java"
+          echo 'PASS: folder-scoped playlist with Previous / Next buttons'
 
       - name: Compile and test video player pure Java logic
         working-directory: ${{ steps.source.outputs.project }}
@@ -119,17 +157,20 @@ jobs:
             "$src/VideoZoomLogic.java" \
             "$src/VideoFreshnessLogic.java" \
             "$src/VideoFolderLogic.java" \
+            "$src/VideoFolderQueueLogic.java" \
             "$src/VideoPlayerLogic.java" \
             "$src/VideoResumeLogic.java" \
             "$src/VideoExitPolicy.java" \
             "$src/ThemePalette.java" \
             "$src/PremiumExperienceLogic.java" \
+            "$src/VideoHomeControlsLogic.java" \
             "$tests"/*Test.java
-          for cls in ExternalVideoPolicyTest VideoZoomLogicTest VideoFreshnessLogicTest VideoFolderLogicTest VideoPlayerLogicTest VideoResumeLogicTest VideoExitPolicyTest ThemePaletteTest PremiumExperienceLogicTest; do
+          for cls in ExternalVideoPolicyTest VideoZoomLogicTest VideoFreshnessLogicTest VideoFolderLogicTest VideoPlayerLogicTest VideoResumeLogicTest VideoExitPolicyTest ThemePaletteTest PremiumExperienceLogicTest VideoHomeControlsLogicTest VideoFolderQueueLogicTest; do
             java -cp build/video-test-classes com.srcreationfarm.videoplayer."$cls"
           done
           java -cp build/video-test-classes com.srcreationfarm.videoplayer.JavaSourceSyntaxTest "$src"
           java -cp build/video-test-classes com.srcreationfarm.videoplayer.VideoLibrarySourceFieldsTest "$src/VideoLibraryActivity.java"
+          java -cp build/video-test-classes com.srcreationfarm.videoplayer.VideoFolderQueueIntegrationSourceTest "$src"
 
       - name: Assemble debug APK
         working-directory: ${{ steps.source.outputs.project }}
