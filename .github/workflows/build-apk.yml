@@ -1,0 +1,160 @@
+name: Build SR Video Player Pro APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract video-player source ZIP securely
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, stat, zipfile
+          repo=pathlib.Path(os.environ['GITHUB_WORKSPACE']).resolve()
+          output=pathlib.Path(os.environ['GITHUB_OUTPUT'])
+          def android_project(p):
+              return ((p/'settings.gradle').is_file() or (p/'settings.gradle.kts').is_file()) and ((p/'app/build.gradle').is_file() or (p/'app/build.gradle.kts').is_file())
+          source=repo/'SRVideoPlayerPro_GitHub.zip'
+          if source.is_file():
+              dest=pathlib.Path(os.environ['RUNNER_TEMP'])/'sr-video-player-sources'
+              dest.mkdir(parents=True,exist_ok=True)
+              with zipfile.ZipFile(source) as archive:
+                  for e in archive.infolist():
+                      name=e.filename
+                      target=(dest/name).resolve()
+                      if not target.is_relative_to(dest) or stat.S_ISLNK(e.external_attr>>16):
+                          raise SystemExit(f'Unsafe ZIP entry: {name}')
+                  archive.extractall(dest)
+              matches=sorted({f.parent for f in dest.rglob('settings.gradle') if android_project(f.parent)})
+              if len(matches)!=1:
+                  raise SystemExit(f'Expected 1 Android project in source ZIP; found {len(matches)}')
+              project=matches[0]
+          elif android_project(repo):
+              project=repo
+          elif android_project(repo/'SRVideoPlayerPro'):
+              project=repo/'SRVideoPlayerPro'
+          else:
+              raise SystemExit('Upload SRVideoPlayerPro_GitHub.zip into repo root, or unpack the Android project.')
+          print('Project:',project)
+          with output.open('a') as f: f.write(f'project={project}\n')
+          PY
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK command-line tools
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Install Android SDK 36 and build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install 'platforms;android-36' 'build-tools;35.0.0'
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?SDK missing}}"
+          test -s "$sdk_root/platforms/android-36/android.jar"
+          test -x "$sdk_root/build-tools/35.0.0/aapt2"
+
+      - name: Set up Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Verify independent app identity, permissions, Open With and old video features
+        working-directory: ${{ steps.source.outputs.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest=app/src/main/AndroidManifest.xml
+          test -f app/src/main/res/layout/sr_zoomable_video_surface.xml
+          grep -q "applicationId 'com.srcreationfarm.videoplayer'" app/build.gradle
+          grep -q 'android.intent.action.VIEW' "$manifest"
+          grep -q 'android.intent.action.SEND' "$manifest"
+          grep -q 'android:mimeType="video/\*"' "$manifest"
+          grep -q 'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK' "$manifest"
+          ! grep -q 'QUERY_ALL_PACKAGES\|READ_SMS\|SEND_SMS\|BIND_ACCESSIBILITY_SERVICE\|SYSTEM_ALERT_WINDOW\|SCHEDULE_EXACT_ALARM' "$manifest"
+          src=app/src/main/java/com/srcreationfarm/videoplayer
+          test -f "$src/VideoLibraryActivity.java"
+          test -f "$src/VideoPlayerActivity.java"
+          test -f "$src/VideoPlaybackService.java"
+          test -f "$src/VideoThumbnailLoader.java"
+          grep -q 'ScaleGestureDetector' "$src/VideoPlayerActivity.java"
+          grep -q 'setOnTouchListener' "$src/VideoPlayerActivity.java"
+          grep -q 'scheduleSleepTimer' "$src/VideoPlayerActivity.java"
+          grep -q 'ACTION_OPEN_DOCUMENT' "$src/VideoPlayerActivity.java"
+          grep -q 'VideoFreshnessStore' "$src/VideoLibraryActivity.java"
+          grep -q 'VideoResumeStore' "$src/VideoLibraryActivity.java"
+          grep -q 'VideoPlaybackService' "$src/VideoPlayerActivity.java"
+          grep -q 'ExternalVideoIntent.uriFrom' "$src/VideoPlayerActivity.java"
+          grep -q 'media3-exoplayer-rtsp' app/build.gradle
+
+      - name: Compile and test video player pure Java logic
+        working-directory: ${{ steps.source.outputs.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/video-test-classes
+          src=app/src/main/java/com/srcreationfarm/videoplayer
+          tests=tests/com/srcreationfarm/videoplayer
+          javac --release 17 -d build/video-test-classes \
+            "$src/ExternalVideoPolicy.java" \
+            "$src/VideoZoomLogic.java" \
+            "$src/VideoFreshnessLogic.java" \
+            "$src/VideoFolderLogic.java" \
+            "$src/VideoPlayerLogic.java" \
+            "$src/VideoResumeLogic.java" \
+            "$src/VideoExitPolicy.java" \
+            "$src/ThemePalette.java" \
+            "$src/PremiumExperienceLogic.java" \
+            "$tests"/*Test.java
+          for cls in ExternalVideoPolicyTest VideoZoomLogicTest VideoFreshnessLogicTest VideoFolderLogicTest VideoPlayerLogicTest VideoResumeLogicTest VideoExitPolicyTest ThemePaletteTest PremiumExperienceLogicTest; do
+            java -cp build/video-test-classes com.srcreationfarm.videoplayer."$cls"
+          done
+          java -cp build/video-test-classes com.srcreationfarm.videoplayer.JavaSourceSyntaxTest "$src"
+          java -cp build/video-test-classes com.srcreationfarm.videoplayer.VideoLibrarySourceFieldsTest "$src/VideoLibraryActivity.java"
+
+      - name: Assemble debug APK
+        working-directory: ${{ steps.source.outputs.project }}
+        run: gradle --no-daemon --console=plain :app:assembleDebug
+
+      - name: Android lint report
+        continue-on-error: true
+        working-directory: ${{ steps.source.outputs.project }}
+        run: gradle --no-daemon --console=plain :app:lintDebug
+
+      - name: Verify APK exists
+        working-directory: ${{ steps.source.outputs.project }}
+        run: test -s app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload SR Video Player Pro APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SR-Video-Player-Pro-APK
+          path: ${{ steps.source.outputs.project }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload lint reports (when available)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SR-Video-Player-Pro-Lint
+          path: ${{ steps.source.outputs.project }}/app/build/reports/lint-results-debug.*
+          if-no-files-found: ignore
